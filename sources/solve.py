@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 from hashlib import blake2b
-from random import randbytes
+from random import choices, randint
 from tqdm import tqdm
 from json import dump
 import argparse
 import logging
 import time
+from string import printable
 
 
 logger = None
+VERBOSE = False
 
 class CustomFormatter(logging.Formatter):
     COLORS = {
@@ -45,12 +47,12 @@ def get_logger(logging_level) -> logging.Logger:
     return logger
 
 NAME = "Prikhodko Yuriy Oleksandrovych"
-MSG1 = f'Wake up, {NAME}!\nThe Matrix has you...'.encode()
-MSG2 = f'Follow the white rabbit.\nKnock, knock, {NAME}.'.encode()
+MSG1 = f'Wake up, {NAME}!\nThe Matrix has you...'
+MSG2 = f'Follow the white rabbit.\nKnock, knock, {NAME}.'
 
 PREIMAGE_BITSIZE = 16
 BIRTHDAY_BITSIZE = 32
-MUTATION_BYTESIZE = 32
+MUTATION_BYTESIZE = 16
 
 COUNTER_TS = 10000
 
@@ -69,44 +71,72 @@ def parse_args() -> tuple:
 
     return (log_level, args.iterations)
     
-
 def msgMutator(msg: bytes) -> bytes:
-    return randbytes(MUTATION_BYTESIZE//2) + msg + randbytes(MUTATION_BYTESIZE//2)
+    return ''.join(choices(printable, k = MUTATION_BYTESIZE // 2)) + msg + ''.join(choices(printable, k = MUTATION_BYTESIZE // 2))
 
-def preimageAttack(target_hash: bytes, bit_size: int, message: bytes, mutate: bool = False) -> tuple:
+def msgCorrupt(msg: bytes) -> bytes:
+    a = randint(0, len(msg) - 1)
+    msg = msg[:a] + choices(printable)[0] + msg[a + 1:]
+    return msg
+
+def preimageAttack(target_hash: bytes, bit_size: int, message: bytes, mutate: bool = False, verbose: bool = False) -> tuple:
+
+    if verbose:
+        print(f"intial message: {message.encode()}")
+        print(f"hash: {target_hash.hex()}")
+
     counter = 0
     while True:
-        if counter % COUNTER_TS == 0:
-            logger.debug(f"Counter: {counter}")
         if mutate:
-            new_message = msgMutator(message[16:-16])
+            message = msgCorrupt(message)
+            new_message = message 
         else:
-            new_message = message + str(counter).encode()
-        new_hash = blake2b(new_message, digest_size=bit_size // 8).digest()
-        # new_hash = cutHash(new_hash, bit_size)
+            new_message = message + str(counter)
+        new_hash = blake2b(new_message.encode(), digest_size=bit_size // 8).digest()
 
         if new_hash == target_hash:
+            if verbose: print(f"| {counter} | {new_message.encode()} | {new_hash.hex()} |")
             return (new_message, counter)
+
+        if verbose and counter < 30:
+            print(f"| {counter} | {new_message.encode()} | {new_hash.hex()} |")
+        else:
+            if counter % COUNTER_TS == 0:
+                logger.debug(f"Counter: {counter}")
 
         counter += 1
 
-def birthdayAttack(bit_size: int, message: bytes, mutate: bool = False) -> tuple:
+def birthdayAttack(bit_size: int, message: bytes, mutate: bool = False, verbose: bool = False) -> tuple:
     table = {}
     counter = 0
+    if verbose:
+        print(f"intial message: {message.encode()}")
     while True:
-        if counter % COUNTER_TS == 0:
-            logger.debug(f"Counter: {counter}")
+        
         if mutate:
-            new_message = msgMutator(message[16:-16])
+            message = msgCorrupt(message)
+            new_message = message
+            logger.debug(f"Corrupted message: {new_message}")
         else:
-            new_message = message + str(counter).encode()
+            new_message = message + str(counter)
 
-        new_hash = blake2b(new_message, digest_size=bit_size // 8).digest()
+        new_hash = blake2b(new_message.encode(), digest_size=bit_size // 8).digest()
         
         if new_hash in table:
+            if new_message == table[new_hash]:
+                continue
+            if verbose: 
+                print(f"| {counter} | {new_message.encode()} | {new_hash.hex()} |")
+                print(f"{table[new_hash].encode()}, {new_message.encode()}, {list(table.keys()).index(new_hash)}")
             return (table[new_hash], new_message, counter)
         else:
             table[new_hash] = new_message
+
+        if verbose and counter < 30:
+            print(f"| {counter} | {new_message.encode()} | {new_hash.hex()} |")
+        else:
+            if counter % COUNTER_TS == 0:
+                logger.debug(f"Counter: {counter}")
 
         counter += 1
 
@@ -129,12 +159,12 @@ def main() -> None:
         mutated_msg = msgMutator(MSG1)
         logger.debug(f"Mutated message: {mutated_msg}")
 
-        target_hash = blake2b(mutated_msg, digest_size=PREIMAGE_BITSIZE // 8).digest()
+        target_hash = blake2b(mutated_msg.encode(), digest_size=PREIMAGE_BITSIZE // 8).digest()
         logger.debug(f"Hash: {target_hash.hex()}")
 
         logger.debug(f"Searching for a preimage with cutted hash")
         start = time.time()
-        preimage, counter = preimageAttack(target_hash, PREIMAGE_BITSIZE, mutated_msg)
+        preimage, counter = preimageAttack(target_hash, PREIMAGE_BITSIZE, mutated_msg, verbose=((i==0)and VERBOSE))
         stop =  time.time()
 
         attack_time = stop - start
@@ -143,7 +173,7 @@ def main() -> None:
 
         logger.debug(f"Preimage found: {preimage} in {attack_time} seconds")
         logger.debug(f"Asserting...")
-        new_hash = blake2b(preimage, digest_size=PREIMAGE_BITSIZE // 8).digest()
+        new_hash = blake2b(preimage.encode(), digest_size=PREIMAGE_BITSIZE // 8).digest()
 
         assert new_hash == target_hash, f"Preimage is invalid: {new_hash.hex()} != {target_hash.hex()}"
         logger.debug(f"Preimage is valid: {new_hash.hex()} == {target_hash.hex()}")
@@ -165,12 +195,12 @@ def main() -> None:
         mutated_msg = msgMutator(MSG1)
         logger.debug(f"Mutated message: {mutated_msg}")
 
-        target_hash = blake2b(mutated_msg, digest_size=PREIMAGE_BITSIZE // 8).digest()
+        target_hash = blake2b(mutated_msg.encode(), digest_size=PREIMAGE_BITSIZE // 8).digest()
         logger.debug(f"Hash: {target_hash.hex()}")
 
         logger.debug(f"Searching for a preimage with obtained hash")
         start = time.time()
-        preimage, counter = preimageAttack(target_hash, PREIMAGE_BITSIZE, mutated_msg, mutate=True)
+        preimage, counter = preimageAttack(target_hash, PREIMAGE_BITSIZE, mutated_msg, mutate=True, verbose=((i==0)and VERBOSE))
         stop =  time.time()
 
         attack_time = stop - start
@@ -179,7 +209,7 @@ def main() -> None:
 
         logger.debug(f"Preimage found: {preimage} in {attack_time} seconds")
         logger.debug(f"Asserting...")
-        new_hash = blake2b(preimage, digest_size=PREIMAGE_BITSIZE // 8).digest()
+        new_hash = blake2b(preimage.encode(), digest_size=PREIMAGE_BITSIZE // 8).digest()
 
         assert new_hash == target_hash, f"Preimage is invalid: {new_hash.hex()} != {target_hash.hex()}"
         logger.debug(f"Preimage is valid: {new_hash.hex()} == {target_hash.hex()}")
@@ -213,7 +243,7 @@ def main() -> None:
         logger.debug(f"Searching for a collision")
 
         start = time.time()
-        msg1, msg2, counter = birthdayAttack(BIRTHDAY_BITSIZE, mutated_msg)
+        msg1, msg2, counter = birthdayAttack(BIRTHDAY_BITSIZE, mutated_msg, verbose=((i==0)and VERBOSE))
         stop =  time.time()
 
         attack_time = stop - start
@@ -222,10 +252,11 @@ def main() -> None:
 
         logger.debug(f"Collision found: ({msg1}, {msg2}) in {attack_time} seconds")
         logger.debug(f"Asserting...")
-        hash1 = blake2b(msg1, digest_size=BIRTHDAY_BITSIZE // 8).digest()
-        hash2 = blake2b(msg2, digest_size=BIRTHDAY_BITSIZE // 8).digest()
+        hash1 = blake2b(msg1.encode(), digest_size=BIRTHDAY_BITSIZE // 8).digest()
+        hash2 = blake2b(msg2.encode(), digest_size=BIRTHDAY_BITSIZE // 8).digest()
 
         assert hash1 == hash2, f"Collision is invalid: {hash1.hex()} != {hash2.hex()}"
+        assert msg1 != msg2
         logger.debug(f"Collision is valid: {hash1.hex()} == {hash2.hex()}")
   
     logger.debug(f"Obtained time intervals: {time_intervals_v1}")
@@ -250,7 +281,7 @@ def main() -> None:
         logger.debug(f"Searching for a collision")
 
         start = time.time()
-        msg1, msg2, counter = birthdayAttack(BIRTHDAY_BITSIZE, mutated_msg, mutate=True)
+        msg1, msg2, counter = birthdayAttack(BIRTHDAY_BITSIZE, mutated_msg, mutate=True, verbose=((i==0)and VERBOSE))
         stop =  time.time()
 
         attack_time = stop - start
@@ -259,10 +290,11 @@ def main() -> None:
 
         logger.debug(f"Collision found: ({msg1}, {msg2}) in {attack_time} seconds")
         logger.debug(f"Asserting...")
-        hash1 = blake2b(msg1, digest_size=BIRTHDAY_BITSIZE // 8).digest()
-        hash2 = blake2b(msg2, digest_size=BIRTHDAY_BITSIZE // 8).digest()
+        hash1 = blake2b(msg1.encode(), digest_size=BIRTHDAY_BITSIZE // 8).digest()
+        hash2 = blake2b(msg2.encode(), digest_size=BIRTHDAY_BITSIZE // 8).digest()
 
         assert hash1 == hash2, f"Collision is invalid: {hash1.hex()} != {hash2.hex()}"
+        assert msg1 != msg2
         logger.debug(f"Collision is valid: {hash1.hex()} == {hash2.hex()}")
   
     logger.debug(f"Obtained time intervals: {time_intervals_v2}")
