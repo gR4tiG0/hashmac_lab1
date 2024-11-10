@@ -1,0 +1,7 @@
+services:
+  lab1:
+    container_name: hashmac-lab1
+    build: .
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["python", "solve.py"]
